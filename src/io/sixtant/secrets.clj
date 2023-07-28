@@ -58,47 +58,49 @@
 (defn b64->bytes [^String s] (.decode (Base64/getDecoder) (.getBytes s)))
 
 
-(defn slow-key-stretch-with-pbkdf2 [weak-text-key n-bytes]
-  (kdf/get-bytes
-    (kdf/engine {:key weak-text-key
-                 :salt (b64->bytes "j3gT0zoPJos=")
-                 :alg :pbkdf2
-                 :digest :sha512
-                 :iterations 1e5}) ;; target O(100ms) on commodity hardware
-    n-bytes))
+(defn gen-random-salt []
+  "Generate a 16 byte random salt."
+  (bytes->b64 (nonce/random-bytes 16)))
 
+(defn slow-key-stretch-with-pbkdf2 [weak-text-key salt n-bytes]
+  "Modified to take in a salt parameter."
+  (kdf/get-bytes
+   (kdf/engine {:key weak-text-key
+                :salt (b64->bytes salt)
+                :alg :pbkdf2
+                :digest :sha512
+                :iterations 1e5}) ;; target O(100ms) on commodity hardware
+   n-bytes))
 
 (defn encrypt
-  "Encrypt and return a {:data <b64>, :iv <b64>} that can be decrypted with the
-  same `password`.
-
-  Performs pbkdf2 key stretching with quite a few iterations on `password`."
+  "Modified to generate and store a random salt."
   [clear-text password]
-  (let [initialization-vector (nonce/random-bytes 16)]
+  (let [initialization-vector (nonce/random-bytes 16)
+        salt (gen-random-salt)]
     {:data (bytes->b64
-             (crypto/encrypt
-               (codecs/to-bytes clear-text)
-               (slow-key-stretch-with-pbkdf2 password 64)
-               initialization-vector
-               {:algorithm :aes256-cbc-hmac-sha512}))
-     :iv (bytes->b64 initialization-vector)}))
-
+            (crypto/encrypt
+              (codecs/to-bytes clear-text)
+              (slow-key-stretch-with-pbkdf2 password salt 64)
+              initialization-vector
+              {:algorithm :aes256-cbc-hmac-sha512}))
+     :iv (bytes->b64 initialization-vector)
+     :salt salt}))
 
 (defn decrypt
-  "Decrypt and return the clear text for some output of `encrypt` given the
-  same `password` used during encryption."
-  [{:keys [data iv]} password]
+  "Modified to take in a salt parameter."
+  [{:keys [data iv salt]} password]
   (try
     (codecs/bytes->str
       (crypto/decrypt
         (b64->bytes data)
-        (slow-key-stretch-with-pbkdf2 password 64)
+        (slow-key-stretch-with-pbkdf2 password salt 64)
         (b64->bytes iv)
         {:algorithm :aes256-cbc-hmac-sha512}))
     (catch ExceptionInfo e
       (if (= (:type (ex-data e)) :validation)
         (throw (ex-info "passphrase incorrect" {}))
         (throw e)))))
+
 
 
 (comment
@@ -255,6 +257,29 @@
       (update :password #(or % (read-password "Password:")))
       (write-secrets)))
 
+(defn dissoc-in
+  "Dissociates an entry from a nested associative structure returning a new 
+  nested structure. keys is a sequence of keys. Any empty maps that result 
+  will not be present in the new structure."
+  [m [k & ks]]
+  (let [m' (if ks
+             (if-let [submap (get m k)]
+               (let [submap' (dissoc-in submap ks)]
+                 (if (empty? submap')
+                   (dissoc m k)
+                   (assoc m k submap')))
+               m)
+             (dissoc m k))]
+    (if (empty? m') nil m')))
+
+
+
+(defn delete-secret!
+  "Delete a secret from the secrets map. Takes a key path vector as input."
+  [path]
+  (swap-secrets! dissoc-in path))
+
+
 
 (comment
   ;;; Example: accessing secrets
@@ -280,3 +305,21 @@
 
   ;; Then tell them they can decrypt with
   (read-string (decrypt *1 passphrase)))
+
+(comment 
+  ;; The delete-secret! function is used to remove a secret from the stored secrets. 
+  ;; It requires a key sequence argument (a vector of keys) representing the nested path to the secret to be removed.
+
+  ;; The argument `[:some-ex :personal]` means that we are targeting the secret located in the `:personal` map 
+  ;; which is nested inside the `:some-ex` map in the secrets store. 
+
+  ;; Example usage:
+
+  (delete-secret! [:some-ex :personal])
+
+  ;; This will remove the `:personal` secret stored under `:some-ex`. After execution, the secret will no longer exist in the storage. 
+
+  ;; If you try to retrieve this secret after deleting it with `secrets`, you will get a nil value or an error, 
+  ;; depending on whether you're trying to access the secret directly or as part of a nested structure.
+  )
+
