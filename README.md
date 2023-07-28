@@ -31,7 +31,7 @@ The path used for the secrets file, in priority order, is one of:
 
 
 ```
-wget https://github.com/sixtantIO/secrets/releases/latest/download/secrets
+wget https://github.com/josusanmartin/secrets/releases/latest/download/secrets
 chmod +x secrets
 mv secrets /usr/local/bin
 ```
